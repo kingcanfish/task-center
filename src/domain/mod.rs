@@ -1,1 +1,3 @@
-pub const MODULE_READY: bool = true;
+pub mod labels;
+pub mod state;
+pub mod types;
