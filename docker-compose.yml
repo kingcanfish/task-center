@@ -7,18 +7,49 @@ services:
       POSTGRES_PASSWORD: task_center
     ports:
       - "5432:5432"
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U task_center -d task_center"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
 
   redis:
     image: redis:7-alpine
     ports:
       - "6379:6379"
+    healthcheck:
+      test: ["CMD", "redis-cli", "ping"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
 
-  job-scheduler:
+  admin:
     build: .
-    container_name: job-scheduler
+    command: ["./job_scheduler", "admin"]
     restart: unless-stopped
     env_file:
       - .env
+    depends_on:
+      postgres:
+        condition: service_healthy
+      redis:
+        condition: service_healthy
+    ports:
+      - "8080:8080"
+
+  worker:
+    build: .
+    command: ["./job_scheduler", "worker"]
+    restart: unless-stopped
+    env_file:
+      - .env
+    depends_on:
+      admin:
+        condition: service_started
+      postgres:
+        condition: service_healthy
+      redis:
+        condition: service_healthy
     logging:
       driver: "json-file"
       options:

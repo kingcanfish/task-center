@@ -1,3 +1,11 @@
+FROM node:22-alpine AS admin-ui
+
+WORKDIR /ui
+COPY admin-ui/package.json admin-ui/pnpm-lock.yaml ./
+RUN corepack enable && corepack prepare pnpm@10.33.0 --activate && pnpm install --frozen-lockfile
+COPY admin-ui ./
+RUN pnpm run build
+
 FROM rust:trixie AS builder
 
 WORKDIR /app
@@ -22,10 +30,13 @@ WORKDIR /app
 
 # 从构建阶段复制二进制文件
 COPY --from=builder /app/target/release/job_scheduler .
+COPY --from=admin-ui /ui/dist ./admin-ui/dist
 
 # 使用非root用户运行应用以增强安全性
-RUN useradd -m -U scheduler && chown scheduler:scheduler ./job_scheduler
+RUN useradd -m -U scheduler && chown -R scheduler:scheduler /app
 USER scheduler
 
-# 运行应用
-CMD ["./job_scheduler"]
+EXPOSE 8080
+
+# 默认运行 admin，compose 中的 worker 服务会覆盖 command
+CMD ["./job_scheduler", "admin"]
