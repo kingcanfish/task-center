@@ -1,0 +1,5 @@
+DROP TABLE IF EXISTS admin_actions;
+DROP TABLE IF EXISTS workers;
+DROP TABLE IF EXISTS execution_attempts;
+DROP TABLE IF EXISTS executions;
+DROP TABLE IF EXISTS jobs;

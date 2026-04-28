@@ -1,4 +1,18 @@
 services:
+  postgres:
+    image: postgres:16-alpine
+    environment:
+      POSTGRES_DB: task_center
+      POSTGRES_USER: task_center
+      POSTGRES_PASSWORD: task_center
+    ports:
+      - "5432:5432"
+
+  redis:
+    image: redis:7-alpine
+    ports:
+      - "6379:6379"
+
   job-scheduler:
     build: .
     container_name: job-scheduler
