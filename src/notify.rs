@@ -2,6 +2,13 @@ use anyhow::Result;
 use reqwest::Client;
 use std::env;
 
+#[async_trait::async_trait]
+pub trait Notifier: Send + Sync {
+    async fn notify_job_failed(&self, job_name: &str, error: &str);
+    async fn notify_retry_exhausted(&self, job_name: &str, execution_id: &str);
+    async fn notify_worker_lost(&self, worker_id: &str);
+}
+
 /// Telegram 通知器
 #[derive(Clone)]
 pub struct TelegramNotifier {
@@ -71,5 +78,44 @@ impl TelegramNotifier {
         if let Err(e) = self.send(&message).await {
             log::error!("发送失败通知失败: {}", e);
         }
+    }
+}
+
+#[async_trait::async_trait]
+impl Notifier for TelegramNotifier {
+    async fn notify_job_failed(&self, job_name: &str, error: &str) {
+        let message = format!("❌ <b>任务失败</b>\n任务: {}\n错误: {}", job_name, error);
+        if let Err(e) = self.send(&message).await {
+            log::error!("发送任务失败通知失败: {}", e);
+        }
+    }
+
+    async fn notify_retry_exhausted(&self, job_name: &str, execution_id: &str) {
+        let message = format!(
+            "⚠️ <b>任务重试已耗尽</b>\n任务: {}\n执行: {}",
+            job_name, execution_id
+        );
+        if let Err(e) = self.send(&message).await {
+            log::error!("发送重试耗尽通知失败: {}", e);
+        }
+    }
+
+    async fn notify_worker_lost(&self, worker_id: &str) {
+        let message = format!("⚠️ <b>Worker 离线</b>\nWorker: {}", worker_id);
+        if let Err(e) = self.send(&message).await {
+            log::error!("发送 Worker 离线通知失败: {}", e);
+        }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::{Notifier, TelegramNotifier};
+
+    #[test]
+    fn telegram_notifier_implements_scheduler_notifier() {
+        fn assert_notifier<T: Notifier>() {}
+
+        assert_notifier::<TelegramNotifier>();
     }
 }
