@@ -56,15 +56,14 @@ impl WorkerConfig {
         let app = AppConfig::from_env()?;
         let worker_id = env_required("WORKER_ID")?;
         let labels = parse_env_labels(&env::var("WORKER_LABELS").unwrap_or_default())?;
-        let max_concurrency = env::var("WORKER_MAX_CONCURRENCY")
-            .ok()
-            .and_then(|v| v.parse::<usize>().ok())
-            .unwrap_or(4);
-        let heartbeat_interval = env_seconds("WORKER_HEARTBEAT_INTERVAL_SECONDS", 10);
-        let offline_after = env_seconds("WORKER_OFFLINE_AFTER_SECONDS", 30);
-        let enable_shell_executor = env::var("ENABLE_SHELL_EXECUTOR")
-            .map(|v| v == "true" || v == "1")
-            .unwrap_or(false);
+        let max_concurrency = env_nonzero_usize("WORKER_MAX_CONCURRENCY", 4)?;
+        let heartbeat_interval = env_seconds("WORKER_HEARTBEAT_INTERVAL_SECONDS", 10)?;
+        let offline_after = env_seconds("WORKER_OFFLINE_AFTER_SECONDS", 30)?;
+        let enable_shell_executor = match env::var("ENABLE_SHELL_EXECUTOR") {
+            Ok(value) => parse_env_bool("ENABLE_SHELL_EXECUTOR", &value)?,
+            Err(env::VarError::NotPresent) => false,
+            Err(err) => return Err(anyhow!("ENABLE_SHELL_EXECUTOR is invalid: {err}")),
+        };
         let shell_allowed_commands = env::var("SHELL_ALLOWED_COMMANDS")
             .unwrap_or_default()
             .split(',')
@@ -94,12 +93,50 @@ fn env_required(name: &str) -> Result<String> {
     Ok(value)
 }
 
-fn env_seconds(name: &str, default: u64) -> Duration {
-    env::var(name)
-        .ok()
-        .and_then(|v| v.parse::<u64>().ok())
-        .map(Duration::from_secs)
-        .unwrap_or_else(|| Duration::from_secs(default))
+fn env_nonzero_usize(name: &str, default: usize) -> Result<usize> {
+    match env::var(name) {
+        Ok(value) => parse_nonzero_usize(name, &value),
+        Err(env::VarError::NotPresent) => Ok(default),
+        Err(err) => Err(anyhow!("{name} is invalid: {err}")),
+    }
+}
+
+fn env_seconds(name: &str, default: u64) -> Result<Duration> {
+    match env::var(name) {
+        Ok(value) => parse_nonzero_seconds(name, &value),
+        Err(env::VarError::NotPresent) => Ok(Duration::from_secs(default)),
+        Err(err) => Err(anyhow!("{name} is invalid: {err}")),
+    }
+}
+
+fn parse_nonzero_usize(name: &str, value: &str) -> Result<usize> {
+    let parsed = value
+        .trim()
+        .parse::<usize>()
+        .map_err(|_| anyhow!("{name} must be a positive integer"))?;
+    if parsed == 0 {
+        return Err(anyhow!("{name} must be greater than 0"));
+    }
+    Ok(parsed)
+}
+
+fn parse_nonzero_seconds(name: &str, value: &str) -> Result<Duration> {
+    let parsed = value
+        .trim()
+        .parse::<u64>()
+        .map_err(|_| anyhow!("{name} must be a positive integer number of seconds"))?;
+    if parsed == 0 {
+        return Err(anyhow!("{name} must be greater than 0"));
+    }
+    Ok(Duration::from_secs(parsed))
+}
+
+fn parse_env_bool(name: &str, value: &str) -> Result<bool> {
+    match value.trim().to_ascii_lowercase().as_str() {
+        "true" | "1" => Ok(true),
+        "false" | "0" => Ok(false),
+        _ => Err(anyhow!("{name} must be one of true, false, 1, or 0")),
+    }
 }
 
 pub fn validate_access_token(token: &str) -> Result<()> {
@@ -147,5 +184,63 @@ mod tests {
     fn rejects_empty_access_token() {
         let err = validate_access_token("").unwrap_err();
         assert!(err.to_string().contains("ACCESS_TOKEN"));
+    }
+
+    #[test]
+    fn parses_nonzero_concurrency() {
+        assert_eq!(
+            parse_nonzero_usize("WORKER_MAX_CONCURRENCY", "8").unwrap(),
+            8
+        );
+    }
+
+    #[test]
+    fn rejects_zero_concurrency() {
+        let err = parse_nonzero_usize("WORKER_MAX_CONCURRENCY", "0").unwrap_err();
+        assert!(err.to_string().contains("WORKER_MAX_CONCURRENCY"));
+    }
+
+    #[test]
+    fn rejects_invalid_concurrency() {
+        let err = parse_nonzero_usize("WORKER_MAX_CONCURRENCY", "many").unwrap_err();
+        assert!(err.to_string().contains("WORKER_MAX_CONCURRENCY"));
+    }
+
+    #[test]
+    fn parses_nonzero_duration_seconds() {
+        assert_eq!(
+            parse_nonzero_seconds("WORKER_HEARTBEAT_INTERVAL_SECONDS", "15").unwrap(),
+            Duration::from_secs(15)
+        );
+    }
+
+    #[test]
+    fn rejects_zero_duration_seconds() {
+        let err = parse_nonzero_seconds("WORKER_HEARTBEAT_INTERVAL_SECONDS", "0").unwrap_err();
+        assert!(
+            err.to_string()
+                .contains("WORKER_HEARTBEAT_INTERVAL_SECONDS")
+        );
+    }
+
+    #[test]
+    fn rejects_invalid_duration_seconds() {
+        let err = parse_nonzero_seconds("WORKER_OFFLINE_AFTER_SECONDS", "soon").unwrap_err();
+        assert!(err.to_string().contains("WORKER_OFFLINE_AFTER_SECONDS"));
+    }
+
+    #[test]
+    fn parses_shell_executor_bool_values() {
+        assert!(parse_env_bool("ENABLE_SHELL_EXECUTOR", "true").unwrap());
+        assert!(parse_env_bool("ENABLE_SHELL_EXECUTOR", "1").unwrap());
+        assert!(parse_env_bool("ENABLE_SHELL_EXECUTOR", "TRUE").unwrap());
+        assert!(!parse_env_bool("ENABLE_SHELL_EXECUTOR", "false").unwrap());
+        assert!(!parse_env_bool("ENABLE_SHELL_EXECUTOR", "0").unwrap());
+    }
+
+    #[test]
+    fn rejects_invalid_shell_executor_bool() {
+        let err = parse_env_bool("ENABLE_SHELL_EXECUTOR", "sure").unwrap_err();
+        assert!(err.to_string().contains("ENABLE_SHELL_EXECUTOR"));
     }
 }
