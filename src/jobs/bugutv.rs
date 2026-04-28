@@ -1,8 +1,8 @@
 use anyhow::Result;
 use async_trait::async_trait;
 use regex::Regex;
-use reqwest::cookie::Jar;
 use reqwest::Client;
+use reqwest::cookie::Jar;
 use std::env;
 use std::sync::Arc;
 use std::time::Duration;
@@ -33,7 +33,7 @@ impl Job for BugutvCheckinJob {
         let username = env::var("BUGUTV_USERNAME").ok()?;
         let password = env::var("BUGUTV_PASSWORD").ok()?;
         let cron_expr = env::var("BUGUTV_CRON").unwrap_or_else(|_| "0 0 8 * * *".to_string());
-        
+
         log::info!("从环境变量加载 BugutvCheckinJob 配置");
         Some(Self {
             username,
@@ -64,6 +64,18 @@ impl Job for BugutvCheckinJob {
 }
 
 impl BugutvCheckinJob {
+    pub fn new_for_builtin(username: String, password: String) -> Self {
+        Self {
+            username,
+            password,
+            cron_expr: String::new(),
+        }
+    }
+
+    pub async fn run_checkin_for_builtin(&self) -> Result<()> {
+        self.run_checkin().await
+    }
+
     async fn run_checkin(&self) -> Result<()> {
         let jar = Arc::new(Jar::default());
         let client = Client::builder().cookie_provider(jar).build()?;
