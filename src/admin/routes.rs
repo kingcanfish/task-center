@@ -2,16 +2,20 @@ use axum::{Json, Router, middleware, routing::get};
 use serde_json::json;
 
 use crate::admin::auth::{AuthState, require_token};
+use crate::admin::handlers::{executions, jobs, queues, workers};
 
 pub fn router(access_token: String) -> Router {
     let auth_state = AuthState { access_token };
-    let api_router =
-        Router::new()
-            .route("/health", get(health))
-            .route_layer(middleware::from_fn_with_state(
-                auth_state.clone(),
-                require_token,
-            ));
+    let api_router = Router::new()
+        .route("/health", get(health))
+        .route("/jobs", get(jobs::list_jobs).post(jobs::create_job))
+        .route("/executions", get(executions::list_executions))
+        .route("/workers", get(workers::list_workers))
+        .route("/queues", get(queues::list_queues))
+        .route_layer(middleware::from_fn_with_state(
+            auth_state.clone(),
+            require_token,
+        ));
 
     Router::new()
         .nest("/api", api_router)
