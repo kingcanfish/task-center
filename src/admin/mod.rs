@@ -1,6 +1,7 @@
 pub mod auth;
 pub mod handlers;
 pub mod routes;
+pub mod r#static;
 
 use crate::config::AdminConfig;
 use anyhow::Result;

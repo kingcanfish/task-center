@@ -126,3 +126,53 @@ async fn create_job_returns_not_implemented_with_access_token() {
 
     assert_eq!(response.status(), StatusCode::NOT_IMPLEMENTED);
 }
+
+#[tokio::test]
+async fn unknown_ui_path_serves_index() {
+    let app = job_scheduler::admin::routes::test_router("secret".to_string());
+    let response = app
+        .oneshot(
+            Request::builder()
+                .uri("/jobs")
+                .header("authorization", "Bearer secret")
+                .body(Body::empty())
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+
+    assert!(response.status().is_success());
+}
+
+#[tokio::test]
+async fn unknown_api_path_requires_access_token() {
+    let app = job_scheduler::admin::routes::test_router("secret".to_string());
+    let response = app
+        .oneshot(
+            Request::builder()
+                .uri("/api/missing")
+                .body(Body::empty())
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+
+    assert_eq!(response.status(), StatusCode::UNAUTHORIZED);
+}
+
+#[tokio::test]
+async fn unknown_api_path_returns_not_found_with_access_token() {
+    let app = job_scheduler::admin::routes::test_router("secret".to_string());
+    let response = app
+        .oneshot(
+            Request::builder()
+                .uri("/api/missing")
+                .header("authorization", "Bearer secret")
+                .body(Body::empty())
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+
+    assert_eq!(response.status(), StatusCode::NOT_FOUND);
+}
