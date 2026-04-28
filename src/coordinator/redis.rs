@@ -14,6 +14,10 @@ local shared_queue = KEYS[2]
 local worker_id = ARGV[1]
 local labels_json = ARGV[2]
 local lease_ttl = tonumber(ARGV[3])
+local attempt_ttl = lease_ttl * 30
+if attempt_ttl < 86400 then
+    attempt_ttl = 86400
+end
 
 local ok_labels, labels = pcall(cjson.decode, labels_json)
 if not ok_labels or type(labels) ~= 'table' then
@@ -74,17 +78,20 @@ local function claim_from(queue)
             redis.call('LPOP', queue)
             redis.call('RPUSH', queue, raw)
         else
+            local lease_key = 'lease:' .. item['execution_id']
+            local attempt_key = 'attempt:' .. item['execution_id']
+            local attempt_no = tonumber(redis.call('GET', attempt_key) or '0') + 1
             local lease = {
                 execution_id = item['execution_id'],
                 worker_id = worker_id,
-                attempt_no = 1
+                attempt_no = attempt_no
             }
             local lease_json = cjson.encode(lease)
-            local lease_key = 'lease:' .. item['execution_id']
             local leased = redis.call('SET', lease_key, lease_json, 'NX', 'EX', lease_ttl)
             redis.call('LPOP', queue)
 
             if leased then
+                redis.call('SET', attempt_key, attempt_no, 'EX', attempt_ttl)
                 return lease_json
             end
         end

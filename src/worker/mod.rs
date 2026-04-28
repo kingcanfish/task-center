@@ -1,7 +1,10 @@
 use crate::coordinator::redis::RedisCoordinator;
 use crate::coordinator::{Coordinator, DispatchQueue, Lease};
+use crate::domain::state::ExecutionStatus;
 use crate::domain::types::WorkerHeartbeat;
-use anyhow::Result;
+use crate::executors::{ExecutionContext, TaskExecutor, TaskOutput};
+use crate::store::{CreateAttempt, ExecutionRepository, FinishAttempt};
+use anyhow::{Context, Result, anyhow};
 use std::collections::BTreeSet;
 use std::time::Duration;
 use tokio::time::MissedTickBehavior;
@@ -107,6 +110,82 @@ pub fn heartbeat_from_config(
 
 pub fn worker_has_capacity(active_count: usize, max_concurrency: usize) -> bool {
     active_count < max_concurrency
+}
+
+pub async fn execute_claimed_once<E, X>(
+    executions: &E,
+    executor: &X,
+    execution_id: uuid::Uuid,
+    attempt_no: i32,
+    worker_id: String,
+    config: serde_json::Value,
+    context: ExecutionContext,
+) -> anyhow::Result<()>
+where
+    E: ExecutionRepository,
+    X: TaskExecutor,
+{
+    let attempt = executions
+        .create_attempt(CreateAttempt {
+            execution_id,
+            attempt_no,
+            worker_id,
+        })
+        .await?;
+    let attempt_no = attempt.attempt_no;
+
+    let output = match executor.execute(config, context).await {
+        Ok(output) => output,
+        Err(err) => {
+            let executor_error = err.to_string();
+            let finish_result = executions
+                .finish_attempt(FinishAttempt {
+                    execution_id,
+                    attempt_no,
+                    status: ExecutionStatus::Failed,
+                    exit_code: None,
+                    stdout_summary: None,
+                    stderr_summary: None,
+                    error_message: Some(executor_error.clone()),
+                    duration_ms: None,
+                })
+                .await;
+            if let Err(finish_err) = finish_result {
+                return Err(anyhow!(
+                    "executor failed: {executor_error}; additionally failed to mark attempt failed: {finish_err:#}"
+                ));
+            }
+            return Err(err);
+        }
+    };
+
+    let status = task_output_status(&output);
+
+    executions
+        .finish_attempt(FinishAttempt {
+            execution_id,
+            attempt_no,
+            status,
+            exit_code: output.exit_code,
+            stdout_summary: output.stdout_summary,
+            stderr_summary: output.stderr_summary,
+            error_message: output.error_message,
+            duration_ms: None,
+        })
+        .await
+        .with_context(|| {
+            format!("failed to finish execution attempt {attempt_no} for {execution_id}")
+        })?;
+
+    Ok(())
+}
+
+fn task_output_status(output: &TaskOutput) -> ExecutionStatus {
+    if output.error_message.is_some() || output.exit_code.is_some_and(|exit_code| exit_code != 0) {
+        ExecutionStatus::Failed
+    } else {
+        ExecutionStatus::Succeeded
+    }
 }
 
 #[derive(Debug, Default)]

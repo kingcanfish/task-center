@@ -65,7 +65,11 @@ async fn two_scheduler_ticks_do_not_duplicate_execution() {
 
     let lease = claim_for_label(&redis, "test", &test_label).await;
     assert_eq!(lease.execution_id, executions[0].id);
-    delete_keys(&[format!("lease:{}", lease.execution_id)]).await;
+    delete_keys(&[
+        format!("lease:{}", lease.execution_id),
+        format!("attempt:{}", lease.execution_id),
+    ])
+    .await;
 }
 
 #[tokio::test]
@@ -107,7 +111,11 @@ async fn scheduler_tick_recovers_existing_execution_by_enqueuing_it() {
 
     let lease = claim_for_label(&redis, "test", &test_label).await;
     assert_eq!(lease.execution_id, existing.id);
-    delete_keys(&[format!("lease:{}", lease.execution_id)]).await;
+    delete_keys(&[
+        format!("lease:{}", lease.execution_id),
+        format!("attempt:{}", lease.execution_id),
+    ])
+    .await;
 }
 
 async fn claim_for_label(redis: &RedisCoordinator, key: &str, value: &str) -> Lease {

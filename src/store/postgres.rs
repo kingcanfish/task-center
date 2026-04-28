@@ -177,6 +177,23 @@ impl ExecutionRepository for PostgresStore {
 
     async fn create_attempt(&self, input: CreateAttempt) -> Result<ExecutionAttempt> {
         let mut tx = self.pool.begin().await?;
+        sqlx::query("SELECT pg_advisory_xact_lock(hashtextextended($1::text, 0))")
+            .bind(input.execution_id)
+            .execute(&mut *tx)
+            .await?;
+
+        let attempt_no = sqlx::query_scalar::<_, i32>(
+            r#"
+            SELECT GREATEST($2, COALESCE(MAX(attempt_no), 0) + 1)
+            FROM execution_attempts
+            WHERE execution_id = $1
+            "#,
+        )
+        .bind(input.execution_id)
+        .bind(input.attempt_no)
+        .fetch_one(&mut *tx)
+        .await?;
+
         let attempt = sqlx::query_as::<_, ExecutionAttempt>(
             r#"
             INSERT INTO execution_attempts (execution_id, attempt_no, worker_id, status)
@@ -185,7 +202,7 @@ impl ExecutionRepository for PostgresStore {
             "#,
         )
         .bind(input.execution_id)
-        .bind(input.attempt_no)
+        .bind(attempt_no)
         .bind(&input.worker_id)
         .bind(ExecutionStatus::Running)
         .fetch_one(&mut *tx)
@@ -202,7 +219,7 @@ impl ExecutionRepository for PostgresStore {
             "#,
         )
         .bind(input.execution_id)
-        .bind(input.attempt_no)
+        .bind(attempt_no)
         .bind(input.worker_id)
         .bind(ExecutionStatus::Running)
         .execute(&mut *tx)

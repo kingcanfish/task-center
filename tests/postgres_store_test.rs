@@ -5,7 +5,7 @@ use job_scheduler::domain::state::ExecutionStatus;
 use job_scheduler::domain::types::TaskType;
 use job_scheduler::store::postgres::PostgresStore;
 use job_scheduler::store::{
-    CreateExecution, CreateJob, ExecutionRepository, FinishAttempt, JobRepository,
+    CreateAttempt, CreateExecution, CreateJob, ExecutionRepository, FinishAttempt, JobRepository,
 };
 use serde_json::json;
 use uuid::Uuid;
@@ -52,6 +52,47 @@ async fn duplicate_execution_idempotency_key_is_rejected() {
         .await;
 
     assert!(duplicate.is_err());
+}
+
+#[tokio::test]
+async fn create_attempt_allocates_next_attempt_when_hint_would_duplicate() {
+    let pool = common::pg_pool().await.unwrap();
+    let store = PostgresStore::new(pool);
+    let job = create_test_job(&store).await;
+    let execution = store
+        .create_execution(CreateExecution {
+            job_id: job.id,
+            scheduled_at: Utc::now(),
+            manual_trigger_id: None,
+            idempotency_key: format!("idem_{}", Uuid::new_v4()),
+            shard_index: 0,
+            shard_total: 1,
+        })
+        .await
+        .unwrap();
+
+    let first = store
+        .create_attempt(CreateAttempt {
+            execution_id: execution.id,
+            attempt_no: 1,
+            worker_id: "worker-a".to_string(),
+        })
+        .await
+        .unwrap();
+    let second = store
+        .create_attempt(CreateAttempt {
+            execution_id: execution.id,
+            attempt_no: 1,
+            worker_id: "worker-b".to_string(),
+        })
+        .await
+        .unwrap();
+
+    assert_eq!(first.attempt_no, 1);
+    assert_eq!(second.attempt_no, 2);
+    let loaded = store.get_execution(execution.id).await.unwrap().unwrap();
+    assert_eq!(loaded.attempt_count, 2);
+    assert_eq!(loaded.selected_worker_id.as_deref(), Some("worker-b"));
 }
 
 #[tokio::test]
