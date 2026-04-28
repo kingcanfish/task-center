@@ -1,6 +1,6 @@
 use super::*;
 use crate::domain::types::{ConcurrencyPolicy, MisfirePolicy, RouteStrategy};
-use anyhow::Result;
+use anyhow::{Result, anyhow};
 use sqlx::PgPool;
 
 #[derive(Clone)]
@@ -112,11 +112,17 @@ impl ExecutionRepository for PostgresStore {
     }
 
     async fn update_status(&self, id: Uuid, status: ExecutionStatus) -> Result<()> {
-        sqlx::query("UPDATE executions SET status = $2, updated_at = now() WHERE id = $1")
-            .bind(id)
-            .bind(status)
-            .execute(&self.pool)
-            .await?;
+        let result =
+            sqlx::query("UPDATE executions SET status = $2, updated_at = now() WHERE id = $1")
+                .bind(id)
+                .bind(status)
+                .execute(&self.pool)
+                .await?;
+
+        if result.rows_affected() != 1 {
+            return Err(anyhow!("execution not found: {id}"));
+        }
+
         Ok(())
     }
 
@@ -159,7 +165,7 @@ impl ExecutionRepository for PostgresStore {
 
     async fn finish_attempt(&self, input: FinishAttempt) -> Result<()> {
         let mut tx = self.pool.begin().await?;
-        sqlx::query(
+        let attempt_result = sqlx::query(
             r#"
             UPDATE execution_attempts
             SET finished_at = now(),
@@ -183,11 +189,24 @@ impl ExecutionRepository for PostgresStore {
         .execute(&mut *tx)
         .await?;
 
-        sqlx::query("UPDATE executions SET status = $2, updated_at = now() WHERE id = $1")
-            .bind(input.execution_id)
-            .bind(input.status)
-            .execute(&mut *tx)
-            .await?;
+        if attempt_result.rows_affected() != 1 {
+            return Err(anyhow!(
+                "execution attempt not found: execution_id={}, attempt_no={}",
+                input.execution_id,
+                input.attempt_no
+            ));
+        }
+
+        let execution_result =
+            sqlx::query("UPDATE executions SET status = $2, updated_at = now() WHERE id = $1")
+                .bind(input.execution_id)
+                .bind(input.status)
+                .execute(&mut *tx)
+                .await?;
+
+        if execution_result.rows_affected() != 1 {
+            return Err(anyhow!("execution not found: {}", input.execution_id));
+        }
 
         tx.commit().await?;
         Ok(())
