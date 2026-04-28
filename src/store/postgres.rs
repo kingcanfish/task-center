@@ -12,6 +12,16 @@ impl PostgresStore {
     pub fn new(pool: PgPool) -> Self {
         Self { pool }
     }
+
+    pub async fn list_executions_for_job(&self, job_id: Uuid) -> Result<Vec<Execution>> {
+        let executions = sqlx::query_as::<_, Execution>(
+            "SELECT * FROM executions WHERE job_id = $1 ORDER BY created_at ASC",
+        )
+        .bind(job_id)
+        .fetch_all(&self.pool)
+        .await?;
+        Ok(executions)
+    }
 }
 
 #[async_trait]
@@ -100,6 +110,45 @@ impl ExecutionRepository for PostgresStore {
         .bind(input.shard_total)
         .fetch_one(&self.pool)
         .await?;
+        Ok(execution)
+    }
+
+    async fn create_or_get_execution(&self, input: CreateExecution) -> Result<Execution> {
+        let mut tx = self.pool.begin().await?;
+        let inserted = sqlx::query_as::<_, Execution>(
+            r#"
+            INSERT INTO executions (
+                job_id, scheduled_at, manual_trigger_id, status, idempotency_key,
+                shard_index, shard_total
+            )
+            VALUES ($1, $2, $3, $4, $5, $6, $7)
+            ON CONFLICT (idempotency_key) DO NOTHING
+            RETURNING *
+            "#,
+        )
+        .bind(input.job_id)
+        .bind(input.scheduled_at)
+        .bind(input.manual_trigger_id)
+        .bind(ExecutionStatus::Scheduled)
+        .bind(&input.idempotency_key)
+        .bind(input.shard_index)
+        .bind(input.shard_total)
+        .fetch_optional(&mut *tx)
+        .await?;
+
+        let execution = match inserted {
+            Some(execution) => execution,
+            None => {
+                sqlx::query_as::<_, Execution>(
+                    "SELECT * FROM executions WHERE idempotency_key = $1",
+                )
+                .bind(&input.idempotency_key)
+                .fetch_one(&mut *tx)
+                .await?
+            }
+        };
+
+        tx.commit().await?;
         Ok(execution)
     }
 

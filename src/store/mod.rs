@@ -20,6 +20,7 @@ pub trait JobRepository: Send + Sync {
 #[async_trait]
 pub trait ExecutionRepository: Send + Sync {
     async fn create_execution(&self, input: CreateExecution) -> Result<Execution>;
+    async fn create_or_get_execution(&self, input: CreateExecution) -> Result<Execution>;
     async fn get_execution(&self, id: Uuid) -> Result<Option<Execution>>;
     async fn update_status(&self, id: Uuid, status: ExecutionStatus) -> Result<()>;
     async fn create_attempt(&self, input: CreateAttempt) -> Result<ExecutionAttempt>;
