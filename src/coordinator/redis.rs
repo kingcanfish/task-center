@@ -98,7 +98,7 @@ impl DispatchQueue for RedisCoordinator {
             let item: QueueItem = serde_json::from_str(&value)?;
 
             if !LabelSelector::parse(&item.label_selector)?.matches(labels) {
-                let _: () = conn.rpush("queue:shared", value).await?;
+                let _: () = conn.rpush(queue, value).await?;
                 continue;
             }
 

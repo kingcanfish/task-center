@@ -67,3 +67,45 @@ async fn claim_returns_enqueued_item_once() {
             .is_none()
     );
 }
+
+#[tokio::test]
+async fn direct_queue_nonmatching_item_stays_direct() {
+    let redis = redis().await;
+    let worker_a = format!("worker-a-{}", Uuid::new_v4());
+    let worker_b = format!("worker-b-{}", Uuid::new_v4());
+    let labels_without_http = BTreeMap::from([("executor".to_string(), "shell".to_string())]);
+    let labels_with_http = BTreeMap::from([("executor".to_string(), "http".to_string())]);
+    let direct_queue = format!("queue:worker:{worker_a}");
+    let shared_depth_before = redis.queue_depth("queue:shared").await.unwrap();
+
+    redis
+        .enqueue(QueueItem {
+            execution_id: Uuid::new_v4(),
+            job_id: Uuid::new_v4(),
+            label_selector: "executor=http".to_string(),
+            selected_worker_id: Some(worker_a.clone()),
+        })
+        .await
+        .unwrap();
+
+    assert!(
+        redis
+            .claim_for_worker(&worker_a, &labels_without_http, Duration::from_secs(60))
+            .await
+            .unwrap()
+            .is_none()
+    );
+    assert_eq!(
+        redis.queue_depth("queue:shared").await.unwrap(),
+        shared_depth_before
+    );
+    assert_eq!(redis.queue_depth(&direct_queue).await.unwrap(), 1);
+    assert!(
+        redis
+            .claim_for_worker(&worker_b, &labels_with_http, Duration::from_secs(60))
+            .await
+            .unwrap()
+            .is_none()
+    );
+    assert_eq!(redis.queue_depth(&direct_queue).await.unwrap(), 1);
+}
