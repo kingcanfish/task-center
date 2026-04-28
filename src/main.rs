@@ -1,39 +1,28 @@
-mod jobs;
-mod notify;
-mod scheduler;
-
 use anyhow::Result;
-use std::sync::Arc;
+use clap::{Parser, Subcommand};
+use job_scheduler::{admin, config, worker};
 
-use jobs::bugutv::BugutvCheckinJob;
-use jobs::Job;
-use scheduler::Scheduler;
+#[derive(Debug, Parser)]
+#[command(name = "task-center")]
+struct Cli {
+    #[command(subcommand)]
+    command: Command,
+}
+
+#[derive(Debug, Subcommand)]
+enum Command {
+    Admin,
+    Worker,
+}
 
 #[tokio::main]
 async fn main() -> Result<()> {
-    // 初始化日志记录器
     env_logger::builder()
         .filter_level(log::LevelFilter::Info)
         .init();
-    log::info!("启动 Job Scheduler");
 
-    // 创建调度器（自动初始化 Telegram 通知器）
-    let scheduler = Scheduler::new().await?;
-
-    // 注册 Bugutv 签到任务
-    if let Some(job) = BugutvCheckinJob::from_env() {
-        scheduler.register(Arc::new(job)).await?;
-    } else {
-        log::warn!("未配置 BUGUTV_USERNAME 或 BUGUTV_PASSWORD，跳过 Bugutv 签到任务");
+    match Cli::parse().command {
+        Command::Admin => admin::run(config::AdminConfig::from_env()?).await,
+        Command::Worker => worker::run(config::WorkerConfig::from_env()?).await,
     }
-
-    // TODO: 在这里注册更多任务
-    // if let Some(job) = AnotherJob::from_env() {
-    //     scheduler.register(Arc::new(job)).await?;
-    // }
-
-    // 启动调度器并等待 Ctrl+C 信号
-    scheduler.start_and_wait().await?;
-
-    Ok(())
 }
