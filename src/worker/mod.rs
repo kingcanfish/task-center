@@ -1,13 +1,19 @@
 use crate::coordinator::redis::RedisCoordinator;
 use crate::coordinator::{Coordinator, DispatchQueue, Lease};
 use crate::domain::state::ExecutionStatus;
-use crate::domain::types::WorkerHeartbeat;
+use crate::domain::types::{Job, TaskType, WorkerHeartbeat};
+use crate::executors::bugutv::{BugutvBuiltin, BugutvHeadlessBuiltin};
+use crate::executors::builtin::BuiltinRegistry;
+use crate::executors::http::HttpExecutor;
+use crate::executors::shell::{ShellExecutor, ShellPolicy};
 use crate::executors::{ExecutionContext, TaskExecutor, TaskOutput};
-use crate::store::{CreateAttempt, ExecutionRepository, FinishAttempt};
+use crate::store::postgres::PostgresStore;
+use crate::store::{CreateAttempt, ExecutionRepository, FinishAttempt, JobRepository};
 use anyhow::{Context, Result, anyhow};
 use std::collections::BTreeSet;
 use std::time::Duration;
 use tokio::time::MissedTickBehavior;
+use tokio_util::sync::CancellationToken;
 use uuid::Uuid;
 
 const ERROR_BACKOFF: Duration = Duration::from_secs(1);
@@ -15,6 +21,12 @@ const ERROR_BACKOFF: Duration = Duration::from_secs(1);
 pub async fn run(config: crate::config::WorkerConfig) -> Result<()> {
     log::info!("worker runtime is starting");
     validate_redis_url(&config)?;
+    let pool = sqlx::postgres::PgPoolOptions::new()
+        .max_connections(config.max_concurrency.max(1) as u32)
+        .connect(&config.app.database_url)
+        .await?;
+    sqlx::migrate!("./db/migrations").run(&pool).await?;
+    let store = PostgresStore::new(pool);
 
     let shutdown = shutdown_signal();
     tokio::pin!(shutdown);
@@ -35,7 +47,7 @@ pub async fn run(config: crate::config::WorkerConfig) -> Result<()> {
                 break;
             }
             _ = heartbeat_interval.tick() => {
-                let tick = worker_tick(&coordinator, &config, &mut runtime_state);
+                let tick = worker_tick_with_execution(&coordinator, &store, &config, &mut runtime_state);
                 tokio::select! {
                     _ = &mut shutdown => {
                         log::info!("worker runtime is shutting down");
@@ -201,8 +213,13 @@ impl WorkerRuntimeState {
     pub fn record_claim(&mut self, lease: &Lease) -> bool {
         self.active_execution_ids.insert(lease.execution_id)
     }
+
+    pub fn record_complete(&mut self, execution_id: Uuid) -> bool {
+        self.active_execution_ids.remove(&execution_id)
+    }
 }
 
+#[cfg(test)]
 async fn worker_tick<C>(
     coordinator: &C,
     config: &crate::config::WorkerConfig,
@@ -229,6 +246,164 @@ where
     }
 
     Ok(())
+}
+
+async fn worker_tick_with_execution<C, S>(
+    coordinator: &C,
+    store: &S,
+    config: &crate::config::WorkerConfig,
+    state: &mut WorkerRuntimeState,
+) -> Result<()>
+where
+    C: Coordinator + DispatchQueue,
+    S: JobRepository + ExecutionRepository,
+{
+    let heartbeat = heartbeat_from_config(config, state.active_count());
+    coordinator
+        .heartbeat(heartbeat, config.offline_after)
+        .await?;
+
+    if !worker_has_capacity(state.active_count(), config.max_concurrency) {
+        return Ok(());
+    }
+
+    let Some(lease) = coordinator
+        .claim_for_worker(&config.worker_id, &config.labels, config.offline_after)
+        .await?
+    else {
+        return Ok(());
+    };
+
+    state.record_claim(&lease);
+    log::info!("claimed execution {}", lease.execution_id);
+    let execution_id = lease.execution_id;
+    let result =
+        execute_claimed_job_once(store, store, config, lease, CancellationToken::new()).await;
+    state.record_complete(execution_id);
+    result
+}
+
+pub async fn execute_claimed_job_once<J, E>(
+    jobs: &J,
+    executions: &E,
+    config: &crate::config::WorkerConfig,
+    lease: Lease,
+    cancel: CancellationToken,
+) -> Result<()>
+where
+    J: JobRepository,
+    E: ExecutionRepository,
+{
+    let execution = executions
+        .get_execution(lease.execution_id)
+        .await?
+        .ok_or_else(|| anyhow!("claimed execution not found: {}", lease.execution_id))?;
+    let job = jobs
+        .get(execution.job_id)
+        .await?
+        .ok_or_else(|| anyhow!("job not found for execution {}", execution.id))?;
+
+    let context = ExecutionContext {
+        execution_id: execution.id,
+        scheduled_at: execution.scheduled_at,
+        shard_index: execution.shard_index,
+        shard_total: execution.shard_total,
+        cancel,
+    };
+
+    execute_job_with_lease(executions, &job, config, lease, context).await
+}
+
+async fn execute_job_with_lease<E>(
+    executions: &E,
+    job: &Job,
+    config: &crate::config::WorkerConfig,
+    lease: Lease,
+    context: ExecutionContext,
+) -> Result<()>
+where
+    E: ExecutionRepository,
+{
+    match job.task_type {
+        TaskType::Http => {
+            let executor = HttpExecutor::new();
+            execute_claimed_once(
+                executions,
+                &executor,
+                lease.execution_id,
+                lease.attempt_no,
+                lease.worker_id,
+                job.config_json.clone(),
+                context,
+            )
+            .await
+        }
+        TaskType::Shell => {
+            if !config.enable_shell_executor {
+                return Err(anyhow!("shell executor is disabled for this worker"));
+            }
+            let executor =
+                ShellExecutor::new(ShellPolicy::new(config.shell_allowed_commands.clone()));
+            execute_claimed_once(
+                executions,
+                &executor,
+                lease.execution_id,
+                lease.attempt_no,
+                lease.worker_id,
+                job.config_json.clone(),
+                context,
+            )
+            .await
+        }
+        TaskType::Builtin => {
+            let name = builtin_name(job)?;
+            let executor = BuiltinTaskExecutor::new(name);
+            execute_claimed_once(
+                executions,
+                &executor,
+                lease.execution_id,
+                lease.attempt_no,
+                lease.worker_id,
+                job.config_json.clone(),
+                context,
+            )
+            .await
+        }
+    }
+}
+
+fn builtin_name(job: &Job) -> Result<String> {
+    for field in ["builtin", "name"] {
+        if let Some(name) = job.config_json.get(field).and_then(|value| value.as_str()) {
+            return Ok(name.to_string());
+        }
+    }
+    Ok(job.name.clone())
+}
+
+struct BuiltinTaskExecutor {
+    name: String,
+    registry: BuiltinRegistry,
+}
+
+impl BuiltinTaskExecutor {
+    fn new(name: String) -> Self {
+        let mut registry = BuiltinRegistry::new();
+        registry.register(BugutvBuiltin);
+        registry.register(BugutvHeadlessBuiltin);
+        Self { name, registry }
+    }
+}
+
+#[async_trait::async_trait]
+impl TaskExecutor for BuiltinTaskExecutor {
+    async fn execute(
+        &self,
+        config: serde_json::Value,
+        context: ExecutionContext,
+    ) -> Result<TaskOutput> {
+        self.registry.run(&self.name, config, context).await
+    }
 }
 
 enum ReconnectOutcome {
