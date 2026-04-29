@@ -119,6 +119,41 @@ impl RedisCoordinator {
         let manager = client.get_connection_manager().await?;
         Ok(Self { manager })
     }
+
+    pub async fn list_worker_heartbeats(&self) -> Result<Vec<WorkerHeartbeat>> {
+        let mut conn = self.manager.clone();
+        let mut cursor = 0_u64;
+        let mut heartbeats = Vec::new();
+
+        loop {
+            let (next_cursor, keys): (u64, Vec<String>) = redis::cmd("SCAN")
+                .arg(cursor)
+                .arg("MATCH")
+                .arg("worker:*")
+                .arg("COUNT")
+                .arg(100)
+                .query_async(&mut conn)
+                .await?;
+
+            for key in keys {
+                let Some(value): Option<String> = conn.get(&key).await? else {
+                    continue;
+                };
+                match serde_json::from_str::<WorkerHeartbeat>(&value) {
+                    Ok(heartbeat) => heartbeats.push(heartbeat),
+                    Err(err) => log::warn!("invalid worker heartbeat at {key}: {err}"),
+                }
+            }
+
+            if next_cursor == 0 {
+                break;
+            }
+            cursor = next_cursor;
+        }
+
+        heartbeats.sort_by(|left, right| left.worker_id.cmp(&right.worker_id));
+        Ok(heartbeats)
+    }
 }
 
 #[async_trait]

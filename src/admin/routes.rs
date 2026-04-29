@@ -3,8 +3,13 @@ use serde_json::json;
 
 use crate::admin::auth::{AuthState, require_token};
 use crate::admin::handlers::{executions, jobs, queues, workers};
+use crate::admin::state::AppState;
 
 pub fn router(access_token: String) -> Router {
+    router_with_state(access_token, AppState::empty())
+}
+
+pub fn router_with_state(access_token: String, app_state: AppState) -> Router {
     let auth_state = AuthState { access_token };
     let api_router = Router::new()
         .route("/health", get(health))
@@ -20,7 +25,7 @@ pub fn router(access_token: String) -> Router {
 
     Router::new()
         .nest("/api", api_router)
-        .with_state(auth_state)
+        .with_state(app_state)
         .merge(crate::admin::r#static::static_routes())
 }
 

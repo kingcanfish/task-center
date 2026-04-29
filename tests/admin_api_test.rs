@@ -1,7 +1,16 @@
 use axum::body::{Body, to_bytes};
 use axum::http::{Request, StatusCode};
+use job_scheduler::admin::state::{AdminApiState, AppState};
+use job_scheduler::coordinator::Coordinator;
+use job_scheduler::coordinator::redis::RedisCoordinator;
+use job_scheduler::domain::types::WorkerHeartbeat;
+use job_scheduler::store::postgres::PostgresStore;
 use serde_json::{Value, json};
+use std::collections::BTreeMap;
+use std::time::Duration;
 use tower::ServiceExt;
+
+mod common;
 
 #[tokio::test]
 async fn health_requires_access_token() {
@@ -175,4 +184,122 @@ async fn unknown_api_path_returns_not_found_with_access_token() {
         .unwrap();
 
     assert_eq!(response.status(), StatusCode::NOT_FOUND);
+}
+
+#[tokio::test]
+async fn stateful_admin_api_creates_and_lists_resources() {
+    let pool = common::pg_pool().await.unwrap();
+    let store = PostgresStore::new(pool);
+    let redis = RedisCoordinator::connect("redis://127.0.0.1:6379")
+        .await
+        .unwrap();
+    let app = job_scheduler::admin::routes::router_with_state(
+        "secret".to_string(),
+        AppState::with_api(AdminApiState::new(store, redis.clone())),
+    );
+
+    let name = format!("api_job_{}", uuid::Uuid::new_v4());
+    let response = app
+        .clone()
+        .oneshot(
+            Request::builder()
+                .method("POST")
+                .uri("/api/jobs")
+                .header("authorization", "Bearer secret")
+                .header("content-type", "application/json")
+                .body(Body::from(
+                    json!({
+                        "name": name,
+                        "task_type": "http",
+                        "config_json": {
+                            "method": "GET",
+                            "url": "https://example.com"
+                        },
+                        "cron_expr": "0 0 * * * *",
+                        "label_selector": "executor=http"
+                    })
+                    .to_string(),
+                ))
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+
+    assert_eq!(response.status(), StatusCode::OK);
+    let created_body = to_bytes(response.into_body(), usize::MAX).await.unwrap();
+    let created: Value = serde_json::from_slice(&created_body).unwrap();
+    assert_eq!(created["name"], name);
+    assert_eq!(created["task_type"], "http");
+
+    let response = app
+        .clone()
+        .oneshot(
+            Request::builder()
+                .uri("/api/jobs")
+                .header("authorization", "Bearer secret")
+                .body(Body::empty())
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+
+    assert_eq!(response.status(), StatusCode::OK);
+    let jobs_body = to_bytes(response.into_body(), usize::MAX).await.unwrap();
+    let jobs: Value = serde_json::from_slice(&jobs_body).unwrap();
+    assert!(
+        jobs.as_array()
+            .unwrap()
+            .iter()
+            .any(|job| job["name"] == name),
+        "{jobs}"
+    );
+}
+
+#[tokio::test]
+async fn stateful_admin_api_lists_live_workers() {
+    let pool = common::pg_pool().await.unwrap();
+    let store = PostgresStore::new(pool);
+    let redis = RedisCoordinator::connect("redis://127.0.0.1:6379")
+        .await
+        .unwrap();
+    let worker_id = format!("api-worker-{}", uuid::Uuid::new_v4());
+    redis
+        .heartbeat(
+            WorkerHeartbeat {
+                worker_id: worker_id.clone(),
+                labels: BTreeMap::from([("executor".to_string(), "http".to_string())]),
+                capacity: 4,
+                active_count: 1,
+            },
+            Duration::from_secs(30),
+        )
+        .await
+        .unwrap();
+    let app = job_scheduler::admin::routes::router_with_state(
+        "secret".to_string(),
+        AppState::with_api(AdminApiState::new(store, redis)),
+    );
+
+    let response = app
+        .oneshot(
+            Request::builder()
+                .uri("/api/workers")
+                .header("authorization", "Bearer secret")
+                .body(Body::empty())
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+
+    assert_eq!(response.status(), StatusCode::OK);
+    let body = to_bytes(response.into_body(), usize::MAX).await.unwrap();
+    let workers: Value = serde_json::from_slice(&body).unwrap();
+    assert!(
+        workers
+            .as_array()
+            .unwrap()
+            .iter()
+            .any(|worker| worker["worker_id"] == worker_id && worker["online"] == true),
+        "{workers}"
+    );
 }

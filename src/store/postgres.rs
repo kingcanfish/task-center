@@ -13,6 +13,23 @@ impl PostgresStore {
         Self { pool }
     }
 
+    pub async fn list_jobs(&self) -> Result<Vec<Job>> {
+        let jobs = sqlx::query_as::<_, Job>("SELECT * FROM jobs ORDER BY created_at DESC")
+            .fetch_all(&self.pool)
+            .await?;
+        Ok(jobs)
+    }
+
+    pub async fn list_executions(&self, limit: i64) -> Result<Vec<Execution>> {
+        let executions = sqlx::query_as::<_, Execution>(
+            "SELECT * FROM executions ORDER BY created_at DESC LIMIT $1",
+        )
+        .bind(limit)
+        .fetch_all(&self.pool)
+        .await?;
+        Ok(executions)
+    }
+
     pub async fn list_executions_for_job(&self, job_id: Uuid) -> Result<Vec<Execution>> {
         let executions = sqlx::query_as::<_, Execution>(
             "SELECT * FROM executions WHERE job_id = $1 ORDER BY created_at ASC",
