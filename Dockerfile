@@ -20,6 +20,7 @@ RUN rm -f target/release/deps/job_scheduler*
 
 # 复制真实的源代码并构建
 COPY src ./src
+COPY db ./db
 RUN cargo build --release
 
 # 使用glibc为基础的运行时环境以确保Rust二进制文件兼容性
